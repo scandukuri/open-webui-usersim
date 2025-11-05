@@ -61,7 +61,7 @@
 		updateChatById,
 		updateChatFolderIdById
 	} from '$lib/apis/chats';
-	import { generateOpenAIChatCompletion } from '$lib/apis/openai';
+	import { generateOpenAIChatCompletion, generateOpenAICompletion } from '$lib/apis/openai';
 	import { processWeb, processWebSearch, processYoutubeVideo } from '$lib/apis/retrieval';
 	import { getAndUpdateUserLocation, getUserSettings } from '$lib/apis/users';
 	import {
@@ -1559,7 +1559,56 @@
 		files = [];
 		messageInput?.setText('');
 
-		// Create user message
+		// Check if the last message is a user message - if so, we're responding as assistant
+		const lastMessage = messages.length > 0 ? messages.at(-1) : null;
+		const isRespondingAsAssistant = lastMessage && lastMessage.role === 'user';
+
+		if (isRespondingAsAssistant) {
+			// Create assistant message (manual response)
+			let assistantMessageId = uuidv4();
+			let assistantMessage = {
+				id: assistantMessageId,
+				parentId: lastMessage.id,
+				childrenIds: [],
+				role: 'assistant',
+				content: userPrompt,
+				timestamp: Math.floor(Date.now() / 1000),
+				done: true
+			};
+
+			// Add message to history and Set currentId to messageId
+			history.messages[assistantMessageId] = assistantMessage;
+			history.currentId = assistantMessageId;
+
+			// Append messageId to childrenIds of parent message
+			history.messages[lastMessage.id].childrenIds.push(assistantMessageId);
+
+			// Trigger reactivity
+			history = history;
+
+			await tick();
+			if (autoScroll) {
+				scrollToBottom();
+			}
+
+			console.log('About to call generateUserTurn');
+
+			// Now automatically generate the next user turn
+			try {
+				await generateUserTurn();
+				console.log('generateUserTurn completed');
+			} catch (error) {
+				console.error('Error in generateUserTurn:', error);
+			}
+
+			// focus on chat input
+			const chatInput = document.getElementById('chat-input');
+			chatInput?.focus();
+
+			return;
+		}
+
+		// Create user message (normal flow)
 		let userMessageId = uuidv4();
 		let userMessage = {
 			id: userMessageId,
@@ -1588,6 +1637,87 @@
 		saveSessionSelectedModels();
 
 		await sendMessage(history, userMessageId, { newChat: true });
+	};
+
+	const generateUserTurn = async () => {
+		console.log('generateUserTurn called');
+
+		if (!params.system || params.system.trim() === '') {
+			toast.error($i18n.t('Please enter a system prompt first'));
+			return;
+		}
+
+		if (selectedModels.length === 0 || selectedModels[0] === '') {
+			toast.error($i18n.t('Model not selected'));
+			return;
+		}
+
+		try {
+			// Build the conversation history for the prompt
+			const messages = createMessagesList(history, history.currentId);
+			let promptText = `<|start_header_id|>system<|end_header_id|>\n${params.system}<|eot_id|>`;
+
+			// Add any existing conversation turns
+			for (const msg of messages) {
+				if (msg.role === 'user') {
+					promptText += `<|start_header_id|>user<|end_header_id|>\n${msg.content}<|eot_id|>`;
+				} else if (msg.role === 'assistant') {
+					promptText += `<|start_header_id|>assistant<|end_header_id|>\n${msg.content}<|eot_id|>`;
+				}
+			}
+
+			// Add the user header to prompt for user generation
+			promptText += `<|start_header_id|>user<|end_header_id|>\n`;
+
+			const res = await generateOpenAICompletion(localStorage.token, {
+				model: selectedModels[0],
+				prompt: promptText,
+				max_tokens: 256,
+				temperature: 1.0,
+				top_p: 0.8,
+				stop: ['<|eot_id|>', '<|endconversation|>']
+			});
+
+			if (res && res.choices && res.choices[0]?.text) {
+				const generatedText = res.choices[0].text.trim();
+				console.log('Generated user turn:', generatedText);
+
+				// Create a user message with the generated content
+				let userMessageId = uuidv4();
+				let userMessage = {
+					id: userMessageId,
+					parentId: messages.length !== 0 ? messages.at(-1).id : null,
+					childrenIds: [],
+					role: 'user',
+					content: generatedText,
+					timestamp: Math.floor(Date.now() / 1000),
+					models: selectedModels,
+					done: true
+				};
+
+				// Add message to history and Set currentId to messageId
+				history.messages[userMessageId] = userMessage;
+				history.currentId = userMessageId;
+
+				// Append messageId to childrenIds of parent message
+				if (messages.length !== 0) {
+					history.messages[messages.at(-1).id].childrenIds.push(userMessageId);
+				}
+
+				// Trigger reactivity
+				history = history;
+
+				await tick();
+				if (autoScroll) {
+					scrollToBottom();
+				}
+
+				toast.success($i18n.t('User turn generated successfully'));
+			}
+		} catch (error) {
+			console.error('Error generating user turn:', error);
+			toast.error($i18n.t('Failed to generate user turn: ') + (error?.message || error));
+		}
 	};
 
 	const sendMessage = async (
@@ -2556,6 +2686,7 @@
 						return a;
 					}, [])}
 					{submitPrompt}
+					{generateUserTurn}
 					{stopResponse}
 					{showMessage}
 					{eventTarget}

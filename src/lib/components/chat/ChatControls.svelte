@@ -31,6 +31,7 @@
 	export let submitPrompt: Function;
 	export let stopResponse: Function;
 	export let showMessage: Function;
+	export let generateUserTurn: Function;
 	export let files;
 	export let modelId;
 
@@ -202,6 +203,7 @@
 						on:close={() => {
 							showControls.set(false);
 						}}
+						on:generateUserTurn={generateUserTurn}
 						{models}
 						bind:chatFiles
 						bind:params
@@ -298,6 +300,7 @@
 							on:close={() => {
 								showControls.set(false);
 							}}
+							on:generateUserTurn={generateUserTurn}
 							{models}
 							bind:chatFiles
 							bind:params

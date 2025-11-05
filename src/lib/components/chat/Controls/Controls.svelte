@@ -84,6 +84,14 @@
 							rows="4"
 							placeholder={$i18n.t('Enter system prompt')}
 						/>
+						<button
+							class="mt-2 px-3 py-1.5 text-xs font-medium text-white bg-blue-600 hover:bg-blue-700 dark:bg-blue-600 dark:hover:bg-blue-700 rounded-lg transition"
+							on:click={() => {
+								dispatch('generateUserTurn');
+							}}
+						>
+							{$i18n.t('Generate User Turn')}
+						</button>
 					</div>
 				</Collapsible>
 

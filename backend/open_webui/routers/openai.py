@@ -980,6 +980,142 @@ async def generate_chat_completion(
             await cleanup_response(r, session)
 
 
+@router.post("/completions")
+async def generate_completion(
+    request: Request,
+    form_data: dict,
+    user=Depends(get_verified_user),
+    bypass_filter: Optional[bool] = False,
+):
+    if BYPASS_MODEL_ACCESS_CONTROL:
+        bypass_filter = True
+
+    idx = 0
+
+    payload = {**form_data}
+    metadata = payload.pop("metadata", None)
+
+    model_id = form_data.get("model")
+    model_info = Models.get_model_by_id(model_id)
+
+    # Check model info and override the payload
+    if model_info:
+        if model_info.base_model_id:
+            payload["model"] = model_info.base_model_id
+            model_id = model_info.base_model_id
+
+        params = model_info.params.model_dump()
+
+        if params:
+            payload = apply_model_params_to_body_openai(params, payload)
+
+        # Check if user has access to the model
+        if not bypass_filter and user.role == "user":
+            if not (
+                user.id == model_info.user_id
+                or has_access(
+                    user.id, type="read", access_control=model_info.access_control
+                )
+            ):
+                raise HTTPException(
+                    status_code=403,
+                    detail="Model not found",
+                )
+    elif not bypass_filter:
+        if user.role != "admin":
+            raise HTTPException(
+                status_code=403,
+                detail="Model not found",
+            )
+
+    await get_all_models(request, user=user)
+    model = request.app.state.OPENAI_MODELS.get(model_id)
+    if model:
+        idx = model["urlIdx"]
+    else:
+        raise HTTPException(
+            status_code=404,
+            detail="Model not found",
+        )
+
+    # Get the API config for the model
+    api_config = request.app.state.config.OPENAI_API_CONFIGS.get(
+        str(idx),
+        request.app.state.config.OPENAI_API_CONFIGS.get(
+            request.app.state.config.OPENAI_API_BASE_URLS[idx], {}
+        ),
+    )
+
+    prefix_id = api_config.get("prefix_id", None)
+    if prefix_id:
+        payload["model"] = payload["model"].replace(f"{prefix_id}.", "")
+
+    url = request.app.state.config.OPENAI_API_BASE_URLS[idx]
+    key = request.app.state.config.OPENAI_API_KEYS[idx]
+
+    headers, cookies = await get_headers_and_cookies(
+        request, url, key, api_config, metadata, user=user
+    )
+
+    request_url = f"{url}/completions"
+    payload = json.dumps(payload)
+
+    r = None
+    session = None
+    streaming = False
+    response = None
+
+    try:
+        session = aiohttp.ClientSession(
+            trust_env=True, timeout=aiohttp.ClientTimeout(total=AIOHTTP_CLIENT_TIMEOUT)
+        )
+
+        r = await session.request(
+            method="POST",
+            url=request_url,
+            data=payload,
+            headers=headers,
+            cookies=cookies,
+            ssl=AIOHTTP_CLIENT_SESSION_SSL,
+        )
+
+        # Check if response is SSE
+        if "text/event-stream" in r.headers.get("Content-Type", ""):
+            streaming = True
+            return StreamingResponse(
+                r.content,
+                status_code=r.status,
+                headers=dict(r.headers),
+                background=BackgroundTask(
+                    cleanup_response, response=r, session=session
+                ),
+            )
+        else:
+            try:
+                response = await r.json()
+            except Exception as e:
+                log.error(e)
+                response = await r.text()
+
+            if r.status >= 400:
+                if isinstance(response, (dict, list)):
+                    return JSONResponse(status_code=r.status, content=response)
+                else:
+                    return PlainTextResponse(status_code=r.status, content=response)
+
+            return response
+    except Exception as e:
+        log.exception(e)
+
+        raise HTTPException(
+            status_code=r.status if r else 500,
+            detail="Open WebUI: Server Connection Error",
+        )
+    finally:
+        if not streaming:
+            await cleanup_response(r, session)
+
+
 async def embeddings(request: Request, form_data: dict, user):
     """
     Calls the embeddings endpoint for OpenAI-compatible providers.
